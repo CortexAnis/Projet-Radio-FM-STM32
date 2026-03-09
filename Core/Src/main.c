@@ -76,17 +76,20 @@ static void MX_UART4_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-// Variables pour le menu
-uint8_t menu_actif = 0;           // 0 = page principale, 1 = menu
-uint8_t menu_selection = 0;        // Option sélectionnée (0-5)
+/* Variables d'état de l'IHM et de l'application */
+// Navigation dans le menu principal
+uint8_t menu_actif = 0;           /* 0 = page fonctionnelle, 1 = menu affiché */
+uint8_t menu_selection = 0;       /* index de l'élément surligné dans le menu (0–5) */
 
-// Variables pour les pages
-uint8_t page_actuelle = 0;       // Page actuelle
+// Page actuellement affichée (0 = menu, 1 = radio, 2 = recherche, 3 = presets, ...)
+uint8_t page_actuelle = 0;
 
-// Variables pour les paramètres
-const char* version_firmware = "v1.0.0"; // Version du firmware
+// Informations firmware
+const char* version_firmware = "v1.0.0";
 
-// Variables pour les presets
+// Tableau de 3 presets (fréquences en centièmes de MHz, ex: 8750 = 87.50 MHz)
+uint16_t presets[3] = {0, 0, 0};
+
 /* USER CODE END 0 */
 
 /**
@@ -125,10 +128,9 @@ int main(void)
   /* USER CODE BEGIN 2 */
   ssd1306_Init();
   RDA_Init(&hi2c1);
-  RDA_Tune(&hi2c1, 9850);
-
-  // Charger les presets sauvegardés dans l'EEPROM (si présents)
-  charger_presets_eeprom();
+  HAL_Delay(10);
+  Presets_Load();
+  RDA_Tune(&hi2c1, charger_freq_eeprom());
 
   // Afficher la page Radio en premier (page principale)
   page_actuelle = 1;
@@ -184,17 +186,17 @@ int main(void)
             if (page_actuelle == 1) {
                 // Page Radio FM
                 if (btn == 1) {
-                    // Bouton gauche : Fréquence précédente
                     RDA_ManualDown(&hi2c1);
                     HAL_Delay(200);
+                    sauver_freq_eeprom(RDA_GetRealFrequency(&hi2c1));
                     mettre_a_jour_frequence();
                     signal(RDA_GetQuality(&hi2c1));
                     ssd1306_UpdateScreen();
                 }
                 else if (btn == 2) {
-                    // Bouton droite : Fréquence suivante
                     RDA_ManualUp(&hi2c1);
                     HAL_Delay(200);
+                    sauver_freq_eeprom(RDA_GetRealFrequency(&hi2c1));
                     mettre_a_jour_frequence();
                     signal(RDA_GetQuality(&hi2c1));
                     ssd1306_UpdateScreen();
@@ -225,17 +227,15 @@ int main(void)
             else if (page_actuelle == 2) {
                 // Page Recherche
                 if (btn == 1) {
-                    // Bouton gauche : Recherche station précédente (seek down)
-                    RDA_Seek(&hi2c1, 0, 0, NULL);  // seek_mode=0 (wrap), direction=0 (down)
+                    RDA_Seek(&hi2c1, 0, 0, NULL);
                     HAL_Delay(200);
-                    // Mettre à jour l'affichage
+                    sauver_freq_eeprom(RDA_GetRealFrequency(&hi2c1));
                     afficher_page_recherche();
                 }
                 else if (btn == 2) {
-                    // Bouton droite : Recherche station suivante (seek up)
-                    RDA_Seek(&hi2c1, 0, 1, NULL);  // seek_mode=0 (wrap), direction=1 (up)
+                    RDA_Seek(&hi2c1, 0, 1, NULL);
                     HAL_Delay(200);
-                    // Mettre à jour l'affichage
+                    sauver_freq_eeprom(RDA_GetRealFrequency(&hi2c1));
                     afficher_page_recherche();
                 }
                 else if (btn == 3) {
@@ -265,17 +265,23 @@ int main(void)
                     afficher_page_presets();
                 }
                 else if (btn == 3) {
-                    // Bouton centre : Charger ou sauvegarder le preset
-                    if (presets[preset_selection] == 0) {
-                        // Preset vide : sauvegarder la fréquence actuelle
+                    // Bouton centre : Charger, sauvegarder ou écraser
+                    if (PRESET_VIDE(presets[preset_selection])) {
                         sauvegarder_preset(preset_selection);
-                        afficher_page_presets();  // Réafficher pour montrer le preset sauvegardé
+                        afficher_page_presets();
                     } else {
-                        // Preset existe : charger et aller à la radio
-                        charger_preset(preset_selection);
-                        page_actuelle = 1;  // Aller à la page Radio
-                        menu_actif = 0;
-                        Affiche_Page(1);
+                        if (centre_appui_long()) {
+                            // Appui long = écraser avec la freq actuelle
+                            sauvegarder_preset(preset_selection);
+                            afficher_page_presets();
+                        } else {
+                            // Appui court = charger et aller à la radio
+                            charger_preset(preset_selection);
+                            sauver_freq_eeprom(RDA_GetRealFrequency(&hi2c1));
+                            page_actuelle = 1;
+                            menu_actif = 0;
+                            Affiche_Page(1);
+                        }
                     }
                 }
             }
@@ -470,7 +476,9 @@ static void MX_RTC_Init(void)
   }
 
   /* USER CODE BEGIN Check_RTC_BKUP */
-
+#define RTC_MAGIC_INIT 0x5A5AU
+  /* Ne régler l’heure qu’au premier démarrage (domaine backup réinitialisé) */
+  if (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR0) != RTC_MAGIC_INIT) {
   /* USER CODE END Check_RTC_BKUP */
 
   /** Initialize RTC and set the Time and Date
@@ -493,6 +501,9 @@ static void MX_RTC_Init(void)
   {
     Error_Handler();
   }
+  HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR0, RTC_MAGIC_INIT);
+  }
+#undef RTC_MAGIC_INIT
   /* USER CODE BEGIN RTC_Init 2 */
 
   /* USER CODE END RTC_Init 2 */
